@@ -72,6 +72,30 @@ contract EscrowV1Test is Test {
         new EscrowV1{value: 1 ether}(depositor, arbiter);
     }
 
+    function test_Constructor_RevertIf_ArbiterIsDepositor() public {
+        vm.prank(depositor);
+        vm.expectRevert(
+            EscrowV1.SamePartyNotAllowed.selector
+        );
+
+        new EscrowV1{value:1 ether}(
+            beneficiary,
+            depositor
+        );
+    }
+
+    function test_Constructor_RevertIf_ArbiterIsBeneficiary() public {
+        vm.prank(depositor);
+        vm.expectRevert(
+            EscrowV1.SamePartyNotAllowed.selector
+        );
+
+        new EscrowV1{value:1 ether}(
+            beneficiary,
+            beneficiary
+        );
+    }
+
     // ---------------------------------------------
     // CONFIRM DELIVERY TESTS
     // ---------------------------------------------
@@ -258,6 +282,48 @@ contract EscrowV1Test is Test {
             )
         );
         escrow.resolveDispute(true);
+    }
+
+    // ---------------------------------------------
+    // VIEW FUNCTIONS TESTS
+    // ---------------------------------------------
+
+    function test_GetEscrowInfo_ReturnsCorrectData() public view {
+        
+        (
+            address _depositor,
+            address _beneficiary,
+            address _arbiter,
+            uint256 _amount,
+            uint256 _createdAt,
+            EscrowV1.EscrowState _state,
+            bool _depositorApproved,
+            bool _beneficiaryConfirmed
+        ) = escrow.getEscrowInfo();
+
+        assertEq(_depositor, depositor);
+        assertEq(_beneficiary, beneficiary);
+        assertEq(_arbiter, arbiter);
+        assertEq(_amount, ESCROW_AMOUNT);
+
+        assertGt(_createdAt, 0);
+
+        assertEq(
+            uint256(_state),
+            uint256(
+                EscrowV1.EscrowState.AWAITING_DELIVERY
+            )
+        );
+
+        assertFalse(_depositorApproved);
+        assertFalse(_beneficiaryConfirmed);
+    }
+
+    function test_GetBalance_ReturnsContractBalance() public view {
+        assertEq(
+            escrow.getBalance(),
+            ESCROW_AMOUNT
+        );
     }
 
     // ---------------------------------------------

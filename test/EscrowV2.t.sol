@@ -4,6 +4,7 @@ pragma solidity ^0.8.28;
 import {Test, console} from "forge-std/Test.sol";
 import {EscrowV2} from "../src/EscrowV2.sol";
 import {MaliciousReceiver} from "./helpers/MaliciousReceiver.sol";
+import {RejectETHReceiver} from "./helpers/RejectETHReceiver.sol";
 import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
 
 contract EscrowV2Test is Test {
@@ -144,6 +145,26 @@ contract EscrowV2Test is Test {
         assertEq(escrow.escrowCount(), 3);
     }
 
+    function test_CreateEscrow_RevertIf_ZeroArbiter()
+    public
+    {
+        vm.prank(depositor);
+
+        vm.expectRevert(
+            EscrowV2.InvalidAddress.selector
+        );
+
+
+        escrow.createEscrow{value: ETH_AMOUNT}(
+            beneficiary,
+            address(0),
+            address(0),
+            0,
+            TIMELOCK,
+            ARBITER_FEE
+        );
+    }
+
     // ---------------------------------------------
     // CONFIRM DELIVERY TESTS
     // ---------------------------------------------
@@ -222,6 +243,26 @@ contract EscrowV2Test is Test {
         vm.warp(block.timestamp + 1 days);
         uint256 afterOneDay = escrow.timeUntilRelease(escrowId);
         assertEq(afterOneDay, TIMELOCK - 1 days);
+    }
+
+    function test_TimelockRelease_Token()
+    public {
+        uint256 escrowId =
+            _createTokenEscrow();
+
+        vm.warp(
+            block.timestamp + TIMELOCK + 1
+        );
+
+        uint256 before =
+            token.balanceOf(beneficiary);
+
+        escrow.timelockRelease(escrowId);
+
+        assertEq(
+            token.balanceOf(beneficiary),
+            before + TOKEN_AMOUNT
+        );
     }
 
     // ---------------------------------------------
@@ -383,6 +424,25 @@ contract EscrowV2Test is Test {
         assertEq(token.balanceOf(arbiter), expectedFee);
     }
 
+    function test_ResolveDispute_RevertIf_NotArbiter()
+    public {
+        uint256 escrowId = _createETHEscrow();
+        vm.prank(depositor);
+        escrow.raiseDispute(escrowId);
+        vm.prank(stranger);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                EscrowV2.Unauthorized.selector,
+                stranger
+            )
+        );
+
+        escrow.resolveDispute(
+            escrowId,
+            true
+        );
+    }
+
     // ---------------------------------------------
     // SECURITY TESTS
     // ---------------------------------------------
@@ -462,6 +522,34 @@ contract EscrowV2Test is Test {
             )
         );
         escrow.timelockRelease(escrowId);
+    }
+
+    function test_Security_TransferETH_RevertIf_ReceiverRejects()
+    public
+    {
+        RejectETHReceiver receiver =
+            new RejectETHReceiver();
+
+        vm.prank(depositor);
+
+        uint256 escrowId =
+            escrow.createEscrow{value: ETH_AMOUNT}(
+                address(receiver),
+                arbiter,
+                address(0),
+                0,
+                TIMELOCK,
+                ARBITER_FEE
+            );
+
+
+        vm.prank(depositor);
+
+        vm.expectRevert(
+            EscrowV2.TransferFailed.selector
+        );
+
+        escrow.confirmDelivery(escrowId);
     }
 
     // ---------------------------------------------
@@ -611,5 +699,379 @@ contract EscrowV2Test is Test {
             uint256(escrow.getEscrow(id3).state),
             uint256(EscrowV2.EscrowState.COMPLETE)
         );
+    }
+
+    // ---------------------------------------------
+    // EDGE CASE TESTS
+    // ---------------------------------------------
+
+    function test_EdgeCase_ETHSentForTokenEscrow() public {
+        // Kirim ETH saat buat ERC20 escrow - harus revert
+        vm.startPrank(depositor);
+        token.approve(address(escrow), TOKEN_AMOUNT);
+
+        vm.expectRevert(EscrowV2.ETHNotAccepted.selector);
+        escrow.createEscrow{value: 1 ether}( // ETH dikirim
+            beneficiary,
+            arbiter,
+            address(token), // tapi token ERC20
+            TOKEN_AMOUNT,
+            TIMELOCK,
+            ARBITER_FEE
+        );
+        vm.stopPrank();
+    }
+
+    function test_EdgeCase_InvalidEscrowId() public {
+        // Akses escrow yang belum ada
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                EscrowV2.EscrowNotFound.selector,
+                999
+            )
+        );
+        escrow.getEscrow(999);
+    }
+
+    function test_InvalidEscrowId_Resolve() public {
+        vm.prank(arbiter);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                EscrowV2.EscrowNotFound.selector,
+                999
+            )
+        );
+
+        escrow.resolveDispute(
+            999,
+            true
+        );
+    }
+
+    function test_InvalidEscrowId_Confirm() public {
+        vm.prank(depositor);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                EscrowV2.EscrowNotFound.selector,
+                999
+            )
+        );
+
+        escrow.confirmDelivery(999);
+    }
+
+    function test_EdgeCase_SameParty_ArbiterIsBeneficiary() public {
+        vm.prank(depositor);
+        vm.expectRevert(EscrowV2.SamePartyNotAllowed.selector);
+        escrow.createEscrow{value: ETH_AMOUNT}(
+            beneficiary,
+            beneficiary, // arbiter sama dengan beneficiary
+            address(0),
+            0,
+            TIMELOCK,
+            ARBITER_FEE
+        );
+    }
+
+    function test_EdgeCase_SameParty_DepositorIsBeneficiary() public {
+        vm.prank(depositor);
+        vm.expectRevert(EscrowV2.SamePartyNotAllowed.selector);
+        escrow.createEscrow{value: ETH_AMOUNT}(
+            depositor, // beneficiary sama dengan depositor
+            arbiter,
+            address(0),
+            0,
+            TIMELOCK,
+            ARBITER_FEE
+        );
+    }
+
+    function test_EdgeCase_TimelockExactBoundary() public {
+        uint256 escrowId = _createETHEscrow();
+
+        // Warp ke tepat saat timelock expired (boundary)
+        uint256 releaseTime = block.timestamp + TIMELOCK;
+        vm.warp(releaseTime);
+
+        // Tepat di boundary harus bisa release
+        escrow.timelockRelease(escrowId);
+
+        assertEq(
+            uint256(escrow.getEscrow(escrowId).state),
+            uint256(EscrowV2.EscrowState.COMPLETE)
+        );
+    }
+
+    function test_EdgeCase_DisputeExactBoundary() public {
+        uint256 escrowId = _createETHEscrow();
+
+        // Warp ke 1 detik sebelum timelock
+        vm.warp(block.timestamp + TIMELOCK - 1);
+
+        // Masih bisa raise dispute
+        vm.prank(depositor);
+        escrow.raiseDispute(escrowId);
+
+        assertEq(
+            uint256(escrow.getEscrow(escrowId).state),
+            uint256(EscrowV2.EscrowState.IN_DISPUTE)
+        );
+    }
+
+    function test_EdgeCase_DisputeExactExpiry_Revert() public {
+        uint256 id =
+            _createETHEscrow();
+
+        vm.warp(
+            block.timestamp + TIMELOCK
+        );
+
+        vm.prank(depositor);
+
+        vm.expectRevert(
+            EscrowV2.TimelockExpired.selector
+        );
+
+        escrow.raiseDispute(id);
+    }
+
+    function test_EdgeCase_MaxArbiterFee() public {
+        // Buat escrow dengan fee maksimum (10%)
+        vm.prank(depositor);
+        uint256 escrowId = escrow.createEscrow{value: ETH_AMOUNT}(
+            beneficiary,
+            arbiter,
+            address(0),
+            0,
+            TIMELOCK,
+            1000 // 10% - MAX_ARBITER_FEE
+        );
+
+        vm.prank(depositor);
+        escrow.raiseDispute(escrowId);
+
+        uint256 expectedFee = ETH_AMOUNT * 1000 / 10_000; // 0.1 ETH
+        uint256 expectedAmount = ETH_AMOUNT - expectedFee;
+
+        vm.prank(arbiter);
+        escrow.resolveDispute(escrowId, true);
+
+        assertEq(beneficiary.balance, expectedAmount);
+        assertEq(arbiter.balance, expectedFee);
+    }
+
+    function test_EdgeCase_TimelockTooLong() public {
+        vm.prank(depositor);
+        vm.expectRevert(EscrowV2.InvalidDuration.selector);
+        escrow.createEscrow{value: ETH_AMOUNT}(
+            beneficiary,
+            arbiter,
+            address(0),
+            0,
+            91 days, // lebih dari MAX_TIMELOCK (90 days)
+            ARBITER_FEE
+        );
+    }
+
+    function test_EdgeCase_SameParty_DepositorIsArbiter()
+    public
+    {
+        vm.prank(depositor);
+
+
+        vm.expectRevert(
+            EscrowV2.SamePartyNotAllowed.selector
+        );
+
+
+        escrow.createEscrow{value: ETH_AMOUNT}(
+            beneficiary,
+            depositor,
+            address(0),
+            0,
+            TIMELOCK,
+            ARBITER_FEE
+        );
+    }
+
+    // ---------------------------------------------
+    // EVENT EMISSION TESTS
+    // ---------------------------------------------
+
+    function test_Event_EscrowCreated() public {
+        vm.prank(depositor);
+
+        vm.expectEmit(true, true, true, true);
+        emit EscrowV2.EscrowCreated(
+            0,           // escrowId
+            depositor,
+            beneficiary,
+            arbiter,
+            address(0), // ETH
+            ETH_AMOUNT,
+            TIMELOCK,
+            ARBITER_FEE
+        );
+
+        escrow.createEscrow{value: ETH_AMOUNT}(
+            beneficiary,
+            arbiter,
+            address(0),
+            0,
+            TIMELOCK,
+            ARBITER_FEE
+        );
+    }
+
+    function test_Event_FundsReleased() public {
+        uint256 escrowId = _createETHEscrow();
+
+        vm.expectEmit(true, true, false, true);
+        emit EscrowV2.FundsReleased(escrowId, beneficiary, ETH_AMOUNT);
+
+        vm.prank(depositor);
+        escrow.confirmDelivery(escrowId);
+    }
+
+    function test_Event_DisputeRaised() public {
+        uint256 escrowId = _createETHEscrow();
+
+        vm.expectEmit(true, true, false, false);
+        emit EscrowV2.DisputeRaised(escrowId, depositor);
+
+        vm.prank(depositor);
+        escrow.raiseDispute(escrowId);
+    }
+
+    function test_Event_DisputeResolved() public {
+        uint256 escrowId = _createETHEscrow();
+
+        vm.prank(depositor);
+        escrow.raiseDispute(escrowId);
+
+        uint256 expectedFee = (ETH_AMOUNT * ARBITER_FEE) / 10_000;
+        uint256 expectedAmount = ETH_AMOUNT - expectedFee;
+
+        vm.expectEmit(true, true, true, true);
+        emit EscrowV2.DisputeResolved(
+            escrowId,
+            arbiter,
+            beneficiary,
+            expectedAmount,
+            expectedFee
+        );
+
+        vm.prank(arbiter);
+        escrow.resolveDispute(escrowId, true);
+    }
+
+    // ---------------------------------------------
+    // ADDITIONAL FUZZ TESTS
+    // ---------------------------------------------
+
+    function testFuzz_ETHAmount_FullCoverage(uint256 amount) public {
+        amount = bound(amount, 1, 1000 ether);
+        vm.deal(depositor, amount);
+
+        vm.prank(depositor);
+        uint256 escrowId = escrow.createEscrow{value: amount}(
+            beneficiary,
+            arbiter,
+            address(0),
+            0,
+            TIMELOCK,
+            0 // zero fee untuk simplicity
+        );
+
+        assertEq(escrow.getEscrow(escrowId).amount, amount);
+
+        uint256 beneficiaryBefore = beneficiary.balance;
+
+        vm.prank(depositor);
+        escrow.confirmDelivery(escrowId);
+
+        assertEq(beneficiary.balance, beneficiaryBefore + amount);
+        assertEq(address(escrow).balance, 0);
+    }
+
+    function testFuzz_MultipleDepositor_SameContract(
+        uint8 numEscrows
+    ) public {
+        numEscrows = uint8(bound(uint256(numEscrows), 1, 10));
+
+        uint256[] memory ids = new uint256[](numEscrows);
+        uint256 ethPerEscrow = 1 ether;
+
+        vm.deal(depositor, ethPerEscrow * numEscrows);
+
+        // Buat multiple escrow
+        for (uint256 i = 0; i < numEscrows;) {
+            vm.prank(depositor);
+            ids[i] = escrow.createEscrow{value: ethPerEscrow}(
+                beneficiary,
+                arbiter,
+                address(0),
+                0,
+                TIMELOCK,
+                0
+            );
+            unchecked { i++; }
+        }
+
+        assertEq(escrow.escrowCount(), numEscrows);
+
+        // Verifikasi semua escrow independent
+        for (uint256 i = 0; i < numEscrows;) {
+            assertEq(escrow.getEscrow(ids[i]).amount, ethPerEscrow);
+            assertEq(
+                uint256(escrow.getEscrow(ids[i]).state),
+                uint256(EscrowV2.EscrowState.AWAITING_DELIVERY)
+            );
+            unchecked { i++; }
+        }
+    }
+
+    function testFuzz_FeeCalculation_NoPrecisionLoss(
+        uint256 amount,
+        uint256 feeRate
+    ) public {
+        amount = bound(amount, 1 ether, 100 ether);
+        feeRate = bound(feeRate, 0, 1000);
+
+        vm.deal(depositor, amount);
+
+        vm.prank(depositor);
+        uint256 escrowId = escrow.createEscrow{value: amount}(
+            beneficiary,
+            arbiter,
+            address(0),
+            0,
+            TIMELOCK,
+            feeRate
+        );
+
+        vm.prank(depositor);
+        escrow.raiseDispute(escrowId);
+
+        uint256 arbiterBefore = arbiter.balance;
+        uint256 beneficiaryBefore = beneficiary.balance;
+
+        vm.prank(arbiter);
+        escrow.resolveDispute(escrowId, true);
+
+        uint256 expectedFee = (amount * feeRate) / 10_000;
+        uint256 expectedAmount = amount - expectedFee;
+
+        // Verifikasi: total distribusi = amount awal
+        assertEq(
+            arbiter.balance - arbiterBefore + 
+            beneficiary.balance - beneficiaryBefore,
+            amount
+        );
+        assertEq(beneficiary.balance - beneficiaryBefore, expectedAmount);
+        assertEq(arbiter.balance - arbiterBefore, expectedFee);
+        assertEq(address(escrow).balance, 0);
     }
 }
