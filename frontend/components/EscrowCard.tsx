@@ -188,7 +188,7 @@ export default function EscrowCard({
       )}
 
       {/* Fee info */}
-      {data.arbiterFeeRate > 0n && (
+      {data.arbiterFeeRate > BigInt(0) && (
         <div className="text-xs text-gray-600 mb-4">
           Arbiter fee: {formatFeeRate(data.arbiterFeeRate)} if disputed
         </div>

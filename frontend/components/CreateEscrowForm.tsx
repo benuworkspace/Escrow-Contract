@@ -19,7 +19,7 @@ export default function CreateEscrowForm({
     beneficiary: "",
     arbiter: "",
     ethAmount: "",
-    timelockDuration: TIMELOCK_OPTIONS[2].value, // 7 days default
+    timelockDuration: TIMELOCK_OPTIONS[2].value as number, // 7 days default
     arbiterFeeRate: 200, // 2% default
   });
 
